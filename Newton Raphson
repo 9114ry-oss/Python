@@ -1,0 +1,326 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Nov  7 15:38:48 2025
+
+@author: 9114r
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Five-bus Newton-Raphson powerflow
+Paste and run as a single file.
+"""
+# -*- coding: utf-8 -*-
+"""
+Five-bus Newton-Raphson powerflow
+Paste and run as a single file.
+"""
+import numpy as np
+
+print("numpy version", np.__version__)
+
+S_base = 100.0   # MVA base
+
+# ---------------------------
+# Buses
+# ---------------------------
+class bus:
+    def __init__(self, Name, Type, Volts, Pgen, Qgen, Pload, Qload, Qcap):
+        self.Name = Name
+        self.Type = Type
+        self.Volts = Volts
+        self.Pgen= Pgen
+        self.Qgen = Qgen
+        self.Pload = Pload
+        self.Qload = Qload
+        self.Qcap = Qcap
+        # specified (raw MW / Mvar)
+        self.Pspec = Pgen - Pload
+        self.Qspec = Qgen - Qload
+        # initial angle (radians)
+        self.Angle = 0.0
+
+    def __str__(self):
+        return (f"Bus Name: {self.Name}\n"
+                f"Type: {self.Type}\n"
+                f"Voltage: {self.Volts} p.u.\n"
+                f"Pgen: {self.Pgen} MW, Qgen: {self.Qgen} Mvar\n"
+                f"Pload: {self.Pload} MW, Qload: {self.Qload} Mvar\n"
+                f"Qcap: {self.Qcap} Mvar\n")
+
+Alan = bus("Alan", "SL", 0.98, 0.0, 0.0, 0.0, 0.0, 0.0)
+Betty = bus("Betty", "PV", 1.0 , 210.0, 50.0, 0.0, 0.0, 0.0)
+Clyde = bus("Clyde", "PQ", 1.0, 0.0, 0.0, 110.0, 85.0, 150.0)
+Doug = bus("Doug", "PQ", 1.0, 0.0, 0.0, 100.0, 95.0, 50.0)
+Eve = bus("Eve", "PQ", 1.0, 0.0, 0.0, 150.0, 100.0, 0.0)
+
+print(Alan)
+print(Betty)
+print(Clyde)
+print(Doug)
+print(Eve)
+
+# ---------------------------
+# Lines
+# ---------------------------
+class line:
+    def __init__(self, Name, From, To, Rse, Xse, Gsh, Bsh, Rating_MVA):
+        self.Name = Name
+        self.From = From
+        self.To = To
+        self.Rse = Rse
+        self.Xse = Xse
+        self.Gsh = Gsh
+        self.Bsh = Bsh
+        self.Rating_MVA = Rating_MVA
+
+        self.Z = complex(Rse, Xse)
+        self.Y = 1.0/self.Z
+
+    def __str__(self):
+        return(f"Line Name: {self.Name}\n"
+               f"From: {self.From} To: {self.To}\n"
+               f"R Series: {self.Rse} X Series: {self.Xse}\n"
+               f"G Shunt: {self.Gsh} B Shunt: {self.Bsh}\n"
+               f"MVA Rating: {self.Rating_MVA}\n")
+
+AB = line("Alan to Betty", "Alan", "Betty", 0.009, 0.041, 0.0, 0.0, 125.0)
+BE = line("Betty to Eve", "Betty", "Eve", 0.006, 0.037, 0.0, 0.0, 250.0)
+AD = line("Alen to Doug", "Alen", "Doug", 0.007, 0.055, 0.0, 0.0, 200.0)
+DE = line("Doug to Eve", "Doug", "Eve", 0.006, 0.045, 0.0, 0.0, 125.0)
+DC = line("Doug to Clyde", "Doug", "Clyde", 0.011, 0.061, 0.0, 0.0, 80.0)
+CE = line("Clyde to Eve", "Clyde", "Eve", 0.01, 0.051, 0.0, 0.0, 75.0)
+
+print(AB)
+print(BE)
+print(AD)
+print(DE)
+print(DC)
+print(CE)
+
+# ---------------------------
+# Y-Bus (correct diagonals)
+# ---------------------------
+Y_AA = AB.Y + AD.Y
+Y_BB = AB.Y + BE.Y
+Y_CC = DC.Y + CE.Y
+Y_DD = AD.Y + DC.Y + DE.Y
+Y_EE = BE.Y + DE.Y + CE.Y
+
+Y_BUS = np.array([[Y_AA, -AB.Y, 0.0, -AD.Y, 0.0],
+                  [-AB.Y, Y_BB, 0.0, 0.0, -BE.Y],
+                  [0.0, 0.0, Y_CC, -DC.Y, -CE.Y],
+                  [-AD.Y, 0.0, -DC.Y, Y_DD, -DE.Y],
+                  [0.0, -BE.Y, -CE.Y, -DE.Y, Y_EE]], dtype=complex)
+
+print("Y-bus (complex):")
+for row in Y_BUS:
+    print(" ".join(f"{num:8.4f}" for num in row))
+print()
+
+Mag = np.abs(Y_BUS)
+Y_ang_deg = np.angle(Y_BUS, True)
+Y_ang_rad = np.angle(Y_BUS, False)
+
+# ---------------------------
+# Unknowns (flat start)
+# order: [delta_Betty, delta_Clyde, delta_Doug, delta_Eve, V_Clyde, V_Doug, V_Eve]
+# ---------------------------
+unkn = np.array([[Betty.Angle],
+                 [Clyde.Angle],
+                 [Doug.Angle],
+                 [Eve.Angle],
+                 [Clyde.Volts],
+                 [Doug.Volts],
+                 [Eve.Volts]], dtype=float)
+
+print("Unknown Matrix (flat start):\n", unkn, "\n")
+
+# system arrays
+V = np.array([Alan.Volts, Betty.Volts, Clyde.Volts, Doug.Volts, Eve.Volts], dtype=float)
+delta = np.array([Alan.Angle, Betty.Angle, Clyde.Angle, Doug.Angle, Eve.Angle], dtype=float)
+
+# ---------------------------
+# P and Q calculations (returns p.u.)
+# ---------------------------
+def Calc_P(bus_index, V, delta, Y_mag, Y_ang):
+    k = bus_index
+    terms = V * Y_mag[k, :] * np.cos(Y_ang[k, :] + delta - delta[k])
+    return V[k] * np.sum(terms)
+
+def Calc_Q(bus_index, V, delta, Y_mag, Y_ang):
+    k = bus_index
+    terms = V * Y_mag[k, :] * np.sin(Y_ang[k, :] + delta - delta[k])
+    return -V[k] * np.sum(terms)
+
+# ---------------------------
+# Jacobian element functions
+# (off-diagonals)
+# ---------------------------
+def J1_kn(Y_BUS, V, delta, k, n):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    return V[k] * Y_mag[k,n] * V[n] * np.sin(delta[k]-delta[n]-Y_ang[k,n])
+
+def J2_kn(Y_BUS, V, delta, k, n):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    return V[k] * Y_mag[k,n] * np.cos(delta[k]-delta[n]-Y_ang[k,n])
+
+def J3_kn(Y_BUS, V, delta, k, n):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    return -V[k] * Y_mag[k,n] * V[n] * np.cos(delta[k]-delta[n]-Y_ang[k,n])
+
+def J4_kn(Y_BUS, V, delta, k, n):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    return V[k] * Y_mag[k,n] * np.sin(delta[k]-delta[n]-Y_ang[k,n])
+
+# ---------------------------
+# Jacobian diagonal functions (robust)
+# ---------------------------
+def J1_kk(Y_BUS, V, delta, k):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    idx = np.arange(len(V)) != k
+    return -V[k] * np.sum(V[idx] * Y_mag[k, idx] * np.sin(delta[k] - delta[idx] - Y_ang[k, idx]))
+
+def J2_kk(Y_BUS, V, delta, k):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    idx = np.arange(len(V)) != k
+    diag_term = Y_mag[k,k] * np.cos(Y_ang[k,k])
+    off_term = np.sum(V[idx] * Y_mag[k, idx] * np.cos(delta[k] - delta[idx] - Y_ang[k, idx]))
+    return V[k] * (diag_term + off_term)
+
+def J3_kk(Y_BUS, V, delta, k):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    idx = np.arange(len(V)) != k
+    return V[k] * np.sum(V[idx] * Y_mag[k, idx] * np.cos(delta[k] - delta[idx] - Y_ang[k, idx]))
+
+def J4_kk(Y_BUS, V, delta, k):
+    Y_mag = np.abs(Y_BUS)
+    Y_ang = np.angle(Y_BUS)
+    idx = np.arange(len(V)) != k
+    diag_term = -V[k] * Y_mag[k,k] * np.sin(Y_ang[k,k])
+    off_sum = np.sum(V[idx] * Y_mag[k, idx] * np.sin(delta[k] - delta[idx] - Y_ang[k, idx]))
+    return diag_term + V[k] * off_sum
+
+# ---------------------------
+# Newton-Raphson loop
+# ---------------------------
+Max_iter = 200
+Error_tol = 1e-6
+
+# VERY conservative defaults 
+alpha = 0.10               # damping factor (very small step)
+max_angle_step = 0.05      # rad
+max_voltage_step = 0.02    # p.u.
+
+pv_buses = [1]
+pq_buses = [2,3,4]
+pv_pq = pv_buses + pq_buses
+
+# precompute spec in p.u.
+Pspec_pu = np.array([Alan.Pspec, Betty.Pspec, Clyde.Pspec, Doug.Pspec, Eve.Pspec]) / S_base
+Qspec_pu = np.array([Alan.Qspec, Betty.Qspec, Clyde.Qspec, Doug.Qspec, Eve.Qspec]) / S_base
+
+iter_count = 0
+converged = False
+
+while not converged and iter_count < Max_iter:
+    iter_count += 1
+
+    # sync system state from unknown vector
+    delta[pv_pq] = unkn[:len(pv_pq)].flatten()
+    V[pq_buses] = unkn[len(pv_pq):].flatten()
+
+    # compute Pcalc and Qcalc (p.u.)
+    Pcalc = np.array([Calc_P(k, V, delta, Mag, Y_ang_rad) for k in range(5)])
+    Qcalc = np.array([Calc_Q(k, V, delta, Mag, Y_ang_rad) for k in range(5)])
+
+    # Print Betty's reactive requirement (in p.u. and Mvar)
+    print(f"\nIter {iter_count:2d}  Betty Q required (p.u.) = {Qcalc[1]:.6f}  ({Qcalc[1]*S_base:.1f} Mvar)")
+
+    # mismatch vector (same ordering as unknowns)
+    Mismatch = np.array([
+        [Pspec_pu[1] - Pcalc[1]],
+        [Pspec_pu[2] - Pcalc[2]],
+        [Pspec_pu[3] - Pcalc[3]],
+        [Pspec_pu[4] - Pcalc[4]],
+        [Qspec_pu[2] - Qcalc[2]],
+        [Qspec_pu[3] - Qcalc[3]],
+        [Qspec_pu[4] - Qcalc[4]]
+    ], dtype=float)
+
+    max_mis = np.max(np.abs(Mismatch))
+    print(f"  max mismatch (p.u.) = {max_mis:.6e}")
+    print("  Pcalc [Betty,Clyde,Doug,Eve]:", [Pcalc[1], Pcalc[2], Pcalc[3], Pcalc[4]])
+    print("  Qcalc [Betty,Clyde,Doug,Eve]:", [Qcalc[1], Qcalc[2], Qcalc[3], Qcalc[4]])
+
+    if max_mis < Error_tol:
+        converged = True
+        break
+
+    # Build Jacobian (your existing block code; unchanged)
+    n_ang = len(pv_pq); n_vol = len(pq_buses)
+    J1 = np.zeros((n_ang, n_ang)); J2 = np.zeros((n_ang, n_vol))
+    J3 = np.zeros((n_vol, n_ang)); J4 = np.zeros((n_vol, n_vol))
+
+    for i, k in enumerate(pv_pq):
+        for j, n in enumerate(pv_pq):
+            J1[i, j] = J1_kk(Y_BUS, V, delta, k) if k == n else J1_kn(Y_BUS, V, delta, k, n)
+    for i, k in enumerate(pv_pq):
+        for j, n in enumerate(pq_buses):
+            J2[i, j] = J2_kk(Y_BUS, V, delta, k) if k == n else J2_kn(Y_BUS, V, delta, k, n)
+    for i, k in enumerate(pq_buses):
+        for j, n in enumerate(pv_pq):
+            J3[i, j] = J3_kk(Y_BUS, V, delta, k) if k == n else J3_kn(Y_BUS, V, delta, k, n)
+    for i, k in enumerate(pq_buses):
+        for j, n in enumerate(pq_buses):
+            J4[i, j] = J4_kk(Y_BUS, V, delta, k) if k == n else J4_kn(Y_BUS, V, delta, k, n)
+
+    J = np.vstack((np.hstack((J1, J2)), np.hstack((J3, J4))))
+    condJ = np.linalg.cond(J)
+    print("  Jacobian cond:", condJ)
+    if condJ > 1e12:
+        print("  WARNING: Jacobian ill-conditioned. Consider lowering alpha or checking Y-bus/PQ data.")
+
+    # solve
+    try:
+        dx = np.linalg.solve(J, Mismatch)
+    except np.linalg.LinAlgError:
+        print("Jacobian singular - aborting")
+        break
+
+    # separate angle and voltage parts and clamp them
+    dx_angles = dx[:len(pv_pq)].flatten()
+    dx_volt   = dx[len(pv_pq):].flatten()
+
+    # clamp
+    dx_angles = np.clip(dx_angles, -max_angle_step, max_angle_step)
+    dx_volt   = np.clip(dx_volt, -max_voltage_step, max_voltage_step)
+
+    # assemble back
+    dx_clamped = np.vstack((dx_angles.reshape(-1,1), dx_volt.reshape(-1,1)))
+
+    # apply damping
+    unkn = unkn + alpha * dx_clamped
+
+    # sync
+    delta[pv_pq] = unkn[:len(pv_pq)].flatten()
+    V[pq_buses] = unkn[len(pv_pq):].flatten()
+
+    print("  max |dx| angles, volts:", np.max(np.abs(dx_angles)), np.max(np.abs(dx_volt)))
+    user = input("Enter=continue, 'q'=quit, 'r'=reduce alpha: ")
+    if user.lower() == 'q':
+        break
+    if user.lower() == 'r':
+        alpha = max(0.02, alpha * 0.5)
+        print("  new alpha:", alpha)
+
+print("\nConverged?", converged)
+print("Final voltages:", V)
+print("Final angles:", delta)
